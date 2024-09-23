@@ -19,13 +19,13 @@ PyTorch implementation  for **DPLink: User Identity Linkage via Deep Neural Netw
 	- This data is  from *Transferring heterogeneous links across location-based social networks.  Jiawei Zhang, Xiangnan Kong, and Philip S. Yu. WSDM 2014.* We have no right to directly publish it. If you are interested in this dataset, you can contact with the original author to access the dataset.
 
 # Requirements
-- **Python 2.7**
-- **PyTorch 0.4**
-- tqdm 4.22
-- mlflow 0.5
-- numpy 1.14.0
-- setproctitle 1.1.10
-- scikit-learn 0.19.1
+- **Python 3.9**
+- **PyTorch 2.4.1 with CUDA 12.1**
+- Now we can install requirements by running:
+
+```bash
+pip install -r requirements.txt
+```
 
 # Project Structure
 - run.py # scripts for run experiments

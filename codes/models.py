@@ -167,8 +167,9 @@ class SiameseNet(nn.Module):
     def sort_lens(self, lens):
         # https://github.com/facebookresearch/InferSent/blob/master/models.py#L46
         # https://discuss.pytorch.org/t/torch-from-numpy-not-support-negative-strides/3663
-        lens, idx_sort = np.flip(np.sort(lens), axis=0).copy(), np.argsort(-lens)
-        idx_unsort = np.argsort(idx_sort)
+        lens = lens.cpu()
+        lens, idx_sort = np.flip(np.sort(lens), axis=0).copy(), torch.argsort(-lens)
+        idx_unsort = torch.argsort(idx_sort)
         # https://discuss.pytorch.org/t/runtimeerror-no-grad-accumulator-for-a-saved-leaf/17827
         idx_sort = idx_sort.to(self.device)  # .requires_grad_(True)
         idx_unsort = idx_unsort.to(self.device)
@@ -187,7 +188,7 @@ class SiameseNet(nn.Module):
         lens_top, idx_sort_top, idx_unsort_top = self.sort_lens(lens_top)
         seq_top = seq_top.index_select(0, idx_sort_top)
         # Handling padding in Recurrent Networks
-        seq_top_packed = nn.utils.rnn.pack_padded_sequence(seq_top, lens_top, batch_first=True)
+        seq_top_packed = nn.utils.rnn.pack_padded_sequence(seq_top, lens_top.cpu(), batch_first=True)
         seq_top_out, seq_top_hidden = self.encoder_top(seq_top_packed)
         seq_top_out, _ = nn.utils.rnn.pad_packed_sequence(seq_top_out, batch_first=True)
         # U-sort
@@ -200,7 +201,7 @@ class SiameseNet(nn.Module):
         # down side
         lens_down, idx_sort_down, idx_unsort_down = self.sort_lens(lens_down)
         seq_down = seq_down.index_select(0, idx_sort_down)
-        seq_down_packed = nn.utils.rnn.pack_padded_sequence(seq_down, lens_down, batch_first=True)
+        seq_down_packed = nn.utils.rnn.pack_padded_sequence(seq_down, lens_down.cpu(), batch_first=True)
         seq_down_out, seq_down_hidden = self.encoder_top(seq_down_packed)
         seq_down_out, _ = nn.utils.rnn.pad_packed_sequence(seq_down_out, batch_first=True)
         lens_down = lens_down.index_select(0, idx_unsort_down)

@@ -34,9 +34,9 @@ def run_siamese(SN, args, data_input, LR, train_mode='cross',
                        "validation": {"rank": [], "hit": [], "list": []},
                        "testing": {"rank": [], "hit": [], "list": []}}
     if SAVE_PATH is None:
-        SAVE_PATH = args.save_path + "/"
-    tmp_path = 'checkpoint/'
-    os.mkdir(SAVE_PATH + tmp_path)
+        SAVE_PATH = args.save_path
+    tmp_path = 'checkpoint'
+    os.makedirs(os.path.join(SAVE_PATH, tmp_path))
     for e in tqdm(range(args.epoch), desc="EPOCH"):
         training_len = len(data_input["train"])
         testing_len = len(data_input["test"])
@@ -87,7 +87,7 @@ def run_siamese(SN, args, data_input, LR, train_mode='cross',
 
             metrics_records, loss_records, avg_loss = collect_metrics(metrics_records, loss_records,
                                                                       "training", metrics, label_predict, total_loss)
-            torch.save(SN.state_dict(), SAVE_PATH + tmp_path + str(e) + '.m')
+            torch.save(SN.state_dict(), os.path.join(SAVE_PATH, tmp_path, str(e) + '.m'))
 
             # validation
             total_loss = []
@@ -129,7 +129,7 @@ def run_siamese(SN, args, data_input, LR, train_mode='cross',
             LR = optimizer.param_groups[0]['lr']
             if lr_last > LR:
                 load_epoch = np.argmax(metrics_records["validation"]["hit"])
-                SN.load_state_dict(torch.load(SAVE_PATH + tmp_path + str(load_epoch) + '.m'))
+                SN.load_state_dict(torch.load(os.path.join(SAVE_PATH, tmp_path, str(load_epoch) + '.m')))
                 print('load epoch={} model state'.format(load_epoch))
                 # continue
             if LR <= LR_LOWER_BOUND:
@@ -138,7 +138,7 @@ def run_siamese(SN, args, data_input, LR, train_mode='cross',
                 break
 
     mid = np.argmax(metrics_records["validation"]["hit"])
-    SN.load_state_dict(torch.load(SAVE_PATH + tmp_path + str(mid) + '.m'))
+    SN.load_state_dict(torch.load(os.path.join(SAVE_PATH, tmp_path, str(mid) + '.m')))
 
     # testing
     SN.train(False)
@@ -182,16 +182,16 @@ def run_siamese(SN, args, data_input, LR, train_mode='cross',
 
         if test_pretrain:
             for i in range(len(metrics_records["validation"]["hit"])):
-                SN.load_state_dict(torch.load(SAVE_PATH + tmp_path + str(i) + '.m'))
-                torch.save(SN.state_dict(), SAVE_PATH + 'SN-pre-' + str(i) + '.m')
+                SN.load_state_dict(torch.load(os.path.join(SAVE_PATH, tmp_path, str(i) + '.m')))
+                torch.save(SN.state_dict(), os.path.join(SAVE_PATH, 'SN-pre-' + str(i) + '.m'))
         mid = np.argmax(metrics_records["validation"]["hit"])
-        SN.load_state_dict(torch.load(SAVE_PATH + tmp_path + str(mid) + '.m'))
+        SN.load_state_dict(torch.load(os.path.join(SAVE_PATH, tmp_path, str(mid) + '.m')))
 
         save_name = '-'.join([args.data_name, args.loss_mode, args.rnn_mod, args.attn_mod, str(args.layers)])
         if train_mode == 'self':
             save_name = 'SN-pre'
         json.dump({'loss': loss_records, 'metrics': metrics_records},
-                  fp=open(SAVE_PATH + save_name + '.rs', 'w'), indent=4)
+                  fp=open(os.path.join(SAVE_PATH, save_name + '.rs'), 'w'), indent=4)
         # for web view
         metrics_records_view = {}
         for key1 in metrics_records:
@@ -202,14 +202,14 @@ def run_siamese(SN, args, data_input, LR, train_mode='cross',
                 metrics_records_view[key1][key2] = metrics_records[key1][key2]
 
         json.dump({'loss': loss_records, 'metrics': metrics_records_view},
-                  fp=open(SAVE_PATH + save_name + '-view.txt', 'w'), indent=4)
-        torch.save(SN.state_dict(), SAVE_PATH + save_name + '.m')
+                  fp=open(os.path.join(SAVE_PATH, save_name + '-view.txt'), 'w'), indent=4)
+        torch.save(SN.state_dict(), os.path.join(SAVE_PATH, save_name + '.m'))
 
-        for rt, dirs, files in os.walk(SAVE_PATH + tmp_path):
+        for rt, dirs, files in os.walk(os.path.join(SAVE_PATH, tmp_path)):
             for name in files:
                 remove_path = os.path.join(rt, name)
                 os.remove(remove_path)
-        os.rmdir(SAVE_PATH + tmp_path)
+        os.rmdir(os.path.join(SAVE_PATH, tmp_path))
 
     rank_re, hit_re = None, None
     if train_mode == 'cross':
@@ -225,7 +225,7 @@ def run_experiments(args, run_id=0, device=None, USE_POI=False, model_type='S', 
     if args.data_name in ["weibo"]:
         dense_name = 'isp'
         vid_list, _, _ = load_vids(args.data_path)
-        vid_size = len(vid_list)
+        vid_size = len(vid_list) + 1
         sample_users = samples_generator(args.data_path, args.data_name, threshold=args.threshold)
         data_dense = load_data_match_telecom(args.data_path, 'isp', sample_users=sample_users,
                                              poi_type=args.poi_type)
@@ -234,7 +234,7 @@ def run_experiments(args, run_id=0, device=None, USE_POI=False, model_type='S', 
     elif args.data_name == 'foursquare':
         dense_name = 'twitter'
         data_dense, data_sparse, global_location, global_location_lookup = load_data_match_tf(args.data_path)
-        vid_size = len(global_location)
+        vid_size = len(global_location) + 1
         USE_POI = False
 
     data_dense_split, user_locations_dense = data_split2(data_dense, match_label=True,
@@ -276,7 +276,7 @@ def run_experiments(args, run_id=0, device=None, USE_POI=False, model_type='S', 
             SN_dense, rank_pre, hit_pre = run_siamese(SN_dense, args, data_input_dense_siamese, args.lr_pretrain,
                                                       train_mode='self', device=device, USE_POI=USE_POI)
         else:
-            SN_dense.load_state_dict(torch.load(args.save_path + "/SN-pre.m"))
+            SN_dense.load_state_dict(torch.load(os.path.join(args.save_path, "SN-pre.m")))
 
         if unit == "N":
             pass

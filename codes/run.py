@@ -1,13 +1,17 @@
 from __future__ import print_function, division
 
 import os
+import sys
 import time
 import torch
 import mlflow
 import argparse
 import setproctitle
 import numpy as np
+import shutil
+import pathlib
 
+from urllib.parse import unquote, urlparse
 from match import run_experiments
 
 
@@ -16,7 +20,7 @@ class CustomSettings(object):
                  layers=1, rnn_mod="GRU", attn_mod='dot', lr_step=5, lr_decay=0.1, batch_size=32, l2=0.0,
                  poi=None, loss_mode="BCELoss", neg=32, intersect=1, topk=5, noise=0, pretrain=1, dropout_p=0.5,
                  hidden_size=200, loc_emb_size=200, tim_emb_size=10, poi_type=0, poi_size=21, poi_emb_size=10,
-                 data_path="/data1/input/", save_path="/data1/output/"):
+                 data_path="./data", save_path="./output"):
 
         if seed is None:
             np.random.seed(1)
@@ -90,25 +94,35 @@ if __name__ == '__main__':
     parser.add_argument("--threshold", type=int, default=3200)
     parser.add_argument("--epoch", type=int, default=10)
     parser.add_argument("--pretrain_unit", type=str, default="ERCF", choices=["N", "E", "R", "C", "F", "ERCF"])
+    parser.add_argument("--data_path", type=str, default="./data")
+    parser.add_argument("--save_path", type=str, default="./output")
     args = parser.parse_args()
 
     USE_POI = (args.use_poi == 1)
     device = torch.device("cuda:" + args.gpu)
 
-    mlflow.set_tracking_uri("/data1/output")
+    data_path = os.path.abspath(args.data_path)
+    save_path = os.path.abspath(args.save_path)
+    save_path_uri = pathlib.Path(save_path).as_uri()
+
+    mlflow.set_tracking_uri(save_path_uri)
     experiment_name = "Default"
     experiment_ID = 0
     try:
         experiment_ID = mlflow.create_experiment(name=experiment_name)
         print("Initial Create!")
     except:
-        service = mlflow.tracking.get_service()
-        experiments = service.list_experiments()
-        for exp in experiments:
-            if exp.name == experiment_name:
-                experiment_ID = exp.experiment_id
-                print("Experiment Exists!")
-                break
+        service = mlflow.tracking.MlflowClient()
+        experiment = service.get_experiment_by_name(experiment_name)
+        if experiment is not None:
+            experiment_ID = experiment.experiment_id
+            print("Experiment Exists!")
+
+        # for exp in experiments:
+        #     if exp.name == experiment_name:
+        #         experiment_ID = exp.experiment_id
+        #         print("Experiment Exists!")
+        #         break
 
     setproctitle.setproctitle('DPLink')
 
@@ -120,13 +134,19 @@ if __name__ == '__main__':
     for run_id in range(args.repeat):
         with mlflow.start_run(experiment_id=experiment_ID):
             archive_path = mlflow.get_artifact_uri()
+            archive_path = unquote(urlparse(archive_path).path)
+            if sys.platform == 'win32':
+                archive_path = archive_path[1:]
+
             if run_id == 0:
                 pre_path = archive_path
             else:
                 if test_pretrain:
-                    os.system("cp " + pre_path + "/SN-pre-" + str(run_id) + ".m " + archive_path + "/")
+                    shutil.copy2(pre_path + "/SN-pre-" + str(run_id) + ".m", archive_path)
+                    # os.system("cp " + pre_path + "/SN-pre-" + str(run_id) + ".m " + archive_path + "/")
                 else:
-                    os.system("cp " + pre_path + "/SN-pre.m " + archive_path + "/")
+                    shutil.copy2(pre_path + "/SN-pre.m", archive_path)
+                    # os.system("cp " + pre_path + "/SN-pre.m " + archive_path + "/")
             hidden_size = settings[args.data]["hidden_size"]
             loc_emb_size = settings[args.data]["loc_emb_size"]
             tim_emb_size = settings[args.data]["tim_emb_size"]
@@ -152,12 +172,15 @@ if __name__ == '__main__':
             mlflow.log_param("model", args.model)
             mlflow.log_param("step", run_id)
             mlflow.log_param("pretrain_unit", args.pretrain_unit)
-            run_settings = CustomSettings(data=args.data, neg=32, seed=int(time.time()), pretrain=args.pretrain,
-                                          loss_mode=loss_mode, lr_match=lr_match, l2=l2, dropout_p=dropout_p,
-                                          tim_emb_size=tim_emb_size, loc_emb_size=loc_emb_size,
-                                          hidden_size=hidden_size, epoch=args.epoch, threshold=args.threshold,
-                                          rnn_mod=rnn_unit, attn_mod=attn_unit, save_path=archive_path,
-                                          noise=0 if USE_POI else args.noise_level, poi_type=args.poi_type)
+            run_settings = CustomSettings(
+                data=args.data, neg=32, seed=int(time.time()), pretrain=args.pretrain,
+                loss_mode=loss_mode, lr_match=lr_match, l2=l2, dropout_p=dropout_p,
+                tim_emb_size=tim_emb_size, loc_emb_size=loc_emb_size,
+                hidden_size=hidden_size, epoch=args.epoch, threshold=args.threshold,
+                rnn_mod=rnn_unit, attn_mod=attn_unit,
+                data_path=data_path, save_path=archive_path,
+                noise=0 if USE_POI else args.noise_level, poi_type=args.poi_type
+            )
             model, rank, hit, rank_pre, hit_pre = run_experiments(run_settings, model_type=args.model,
                                                                   run_id=run_id,
                                                                   device=device, USE_POI=USE_POI,

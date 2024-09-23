@@ -1,5 +1,6 @@
 from __future__ import print_function, division
 
+import os
 import time
 import json
 import numpy as np
@@ -14,7 +15,7 @@ VALID_SPLIT = 0.1
 def samples_generator(data_path, data_name, threshold=2000, seed=1):
     tmp = []
     np.random.seed(seed=seed)
-    with open(data_path + data_name) as fid:
+    with open(os.path.join(data_path, data_name)) as fid:
         for line in fid:
             user, trace = line.split("\t")
             trace_len = len(trace.split('|'))
@@ -32,8 +33,8 @@ def load_vids(data_path, data_name="baseLoc"):
     vid_list = {}
     vid_lookup = {}
     vid_array = []
-    poi_info = json.load(open(data_path + "poi_info.json"))
-    with open(data_path + data_name) as fid:
+    poi_info = json.load(open(os.path.join(data_path, "poi_info.json")))
+    with open(os.path.join(data_path, data_name)) as fid:
         for line in fid:
             bid, lat, lon = line.strip("\r\n").split("_")
             lat, lon = float(lat), float(lon)
@@ -54,7 +55,7 @@ def load_data_match_telecom(data_path, data_name, sample_users=None, poi_type=0)
     ##################
     vid_list, vid_lookup, kdtree = load_vids(data_path)
     data = {}
-    with open(data_path + data_name) as fid:
+    with open(os.path.join(data_path, data_name)) as fid:
         for line in fid:
             user, traces = line.strip("\r\n").split("\t")
             if sample_users is not None:
@@ -103,7 +104,7 @@ def load_data_match_sparse(data_path, data_name, sample_users, poi_type=0):
     filter_short_session = 3
     sessions_count_min = 1
     data = {}
-    with open(data_path + data_name) as fid:
+    with open(os.path.join(data_path, data_name)) as fid:
         for line in fid:
             user, traces = line.strip("\r\n").split("\t")
             if user not in sample_users:
@@ -266,7 +267,7 @@ def data_train_match_fix2(data_sparse, data_dense, seed=1, negative_sampling=32,
     np.random.seed(seed)
     data_input = {"train": [], "valid": [], "test": []}
     lens_sparse, lens_dense = len(data_sparse), len(data_dense)
-    idx_sparse, idx_dense = range(lens_sparse), range(lens_dense)
+    idx_sparse, idx_dense = list(range(lens_sparse)), list(range(lens_dense))
     np.random.shuffle(idx_sparse)
     np.random.shuffle(idx_dense)
 
@@ -282,6 +283,9 @@ def data_train_match_fix2(data_sparse, data_dense, seed=1, negative_sampling=32,
         elif data_mode == "test":
             rl_sparse = range(int(lens_sparse * (TRAIN_SPLIT + VALID_SPLIT)), lens_sparse)
             rl_dense = range(int(lens_dense * (TRAIN_SPLIT + VALID_SPLIT)), lens_dense)
+
+        rl_sparse = list(rl_sparse)
+        rl_dense = list(rl_dense)
 
         users_sparse = extract_user_from_trace(idx_sparse, data_sparse, rl_sparse)
         users_dense = extract_user_from_trace(idx_dense, data_dense, rl_dense)
@@ -339,7 +343,7 @@ def data_train_match_fix2(data_sparse, data_dense, seed=1, negative_sampling=32,
 def load_txt_tf(data_path, data_name):
     traces_f = {}
     location_f = {}
-    with open(data_path + data_name) as fid:
+    with open(os.path.join(data_path, data_name)) as fid:
         for line in fid:
             user_id, time_id, loca_id = line.strip("\r\n").split("\t")
             # decimals=2 means 1KMx1KM grids
