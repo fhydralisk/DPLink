@@ -10,6 +10,7 @@ import setproctitle
 import numpy as np
 import shutil
 import pathlib
+import json
 
 from urllib.parse import unquote, urlparse
 from match import run_experiments
@@ -20,7 +21,7 @@ class CustomSettings(object):
                  layers=1, rnn_mod="GRU", attn_mod='dot', lr_step=5, lr_decay=0.1, batch_size=32, l2=0.0,
                  poi=None, loss_mode="BCELoss", neg=32, intersect=1, topk=5, noise=0, pretrain=1, dropout_p=0.5,
                  hidden_size=200, loc_emb_size=200, tim_emb_size=10, poi_type=0, poi_size=21, poi_emb_size=10,
-                 data_path="./data", save_path="./output"):
+                 data_path="./data", save_path="./output", use_aug=False, aug_name="1000_1000"):
 
         if seed is None:
             np.random.seed(1)
@@ -30,6 +31,7 @@ class CustomSettings(object):
             torch.manual_seed(seed)
 
         self.data_path = data_path
+        self.use_aug=use_aug
         self.save_path = save_path
         self.data_name = data
         self.epoch = epoch
@@ -40,6 +42,7 @@ class CustomSettings(object):
         self.lr_step = lr_step
         self.lr_decay = lr_decay
         self.topk = topk
+        self.aug_name = aug_name
 
         self.rnn_mod = rnn_mod
         self.attn_mod = attn_mod
@@ -78,13 +81,14 @@ if __name__ == '__main__':
                                "dropout_p": 0.5,
                                "lr_match": 0.0003,
                                "loss_mode": "BCELoss",
-                               "l2": 1e-5}
+                               "l2": 1e-5},
                 }
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", type=str, default="weibo", choices=['weibo', 'foursquare'])
+    parser.add_argument("--dataset", type=str, default="weibo")
+    parser.add_argument("--city", type=str, default="NewYork")
     parser.add_argument("--gpu", type=str, default="0", choices=["0", "1", "2", "3", "4", "5", "6", "7"])
-    parser.add_argument("--repeat", type=int, default=5)
+    parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--pretrain", type=int, default=1)
     parser.add_argument("--model", type=str, default="ERC", choices=["ERC", "ERPC"])
     parser.add_argument("--rnn", type=str, default="GRU")
@@ -92,10 +96,14 @@ if __name__ == '__main__':
     parser.add_argument("--poi_type", type=int, default=0)
     parser.add_argument("--use_poi", type=int, default=0)
     parser.add_argument("--threshold", type=int, default=3200)
-    parser.add_argument("--epoch", type=int, default=10)
+    parser.add_argument("--epoch", type=int, default=4)
     parser.add_argument("--pretrain_unit", type=str, default="ERCF", choices=["N", "E", "R", "C", "F", "ERCF"])
-    parser.add_argument("--data_path", type=str, default="./data")
+    parser.add_argument("--data_path", type=str, default="/data3/duyuwei/AugMove/dataset/input_timeloc")
     parser.add_argument("--save_path", type=str, default="./output")
+    parser.add_argument("--use_aug", action="store_true")
+    parser.add_argument("--result_path", type=str, default="/data3/duyuwei/AugMove/dataset/model_output")
+    parser.add_argument("--aug_name", type=str, default="1000_1000")
+    parser.add_argument("--task", type=str, default="Trajectory_User_Linkage")
     args = parser.parse_args()
 
     USE_POI = (args.use_poi == 1)
@@ -131,6 +139,7 @@ if __name__ == '__main__':
     attn_unit = 'dot'
     test_pretrain = False  # test the effect of different pretrain degree, working with run_pretrain
     pre_path, rank_pre2, hit_pre2 = None, None, None
+    all_rank, all_hit = 0,0
     for run_id in range(args.repeat):
         with mlflow.start_run(experiment_id=experiment_ID):
             archive_path = mlflow.get_artifact_uri()
@@ -147,18 +156,18 @@ if __name__ == '__main__':
                 else:
                     shutil.copy2(pre_path + "/SN-pre.m", archive_path)
                     # os.system("cp " + pre_path + "/SN-pre.m " + archive_path + "/")
-            hidden_size = settings[args.data]["hidden_size"]
-            loc_emb_size = settings[args.data]["loc_emb_size"]
-            tim_emb_size = settings[args.data]["tim_emb_size"]
-            dropout_p = settings[args.data]["dropout_p"]
-            l2 = settings[args.data]["l2"]
-            lr_match = settings[args.data]["lr_match"]
+            hidden_size = settings["foursquare"]["hidden_size"]
+            loc_emb_size = settings["foursquare"]["loc_emb_size"]
+            tim_emb_size = settings["foursquare"]["tim_emb_size"]
+            dropout_p = settings["foursquare"]["dropout_p"]
+            l2 = settings["foursquare"]["l2"]
+            lr_match = settings["foursquare"]["lr_match"]
             if run_id == 0:
                 loss_mode = "BCELoss"
             else:
-                loss_mode = settings[args.data]["loss_mode"]
+                loss_mode = settings["foursquare"]["loss_mode"]
             mlflow.log_param("loss_mode", loss_mode)
-            mlflow.log_param("data_name", args.data)
+            mlflow.log_param("data_name", args.dataset)
             mlflow.log_param("rnn", rnn_unit)
             mlflow.log_param("attn", attn_unit)
             mlflow.log_param("lr_match", lr_match)
@@ -173,14 +182,16 @@ if __name__ == '__main__':
             mlflow.log_param("step", run_id)
             mlflow.log_param("pretrain_unit", args.pretrain_unit)
             run_settings = CustomSettings(
-                data=args.data, neg=32, seed=int(time.time()), pretrain=args.pretrain,
+                data=args.dataset, neg=32, seed=int(time.time()), pretrain=args.pretrain,
                 loss_mode=loss_mode, lr_match=lr_match, l2=l2, dropout_p=dropout_p,
                 tim_emb_size=tim_emb_size, loc_emb_size=loc_emb_size,
                 hidden_size=hidden_size, epoch=args.epoch, threshold=args.threshold,
                 rnn_mod=rnn_unit, attn_mod=attn_unit,
                 data_path=data_path, save_path=archive_path,
-                noise=0 if USE_POI else args.noise_level, poi_type=args.poi_type
+                noise=0 if USE_POI else args.noise_level, poi_type=args.poi_type,
+                use_aug=args.use_aug, aug_name=args.aug_name
             )
+            # (args, run_id=0, device=None, USE_POI=False, model_type='S', unit=None)
             model, rank, hit, rank_pre, hit_pre = run_experiments(run_settings, model_type=args.model,
                                                                   run_id=run_id,
                                                                   device=device, USE_POI=USE_POI,
@@ -189,5 +200,17 @@ if __name__ == '__main__':
                 rank_pre2, hit_pre2 = rank_pre, hit_pre
             mlflow.log_metric("rank_32", rank)
             mlflow.log_metric("hit_32", hit)
-            mlflow.log_metric("rank_pre", rank_pre2)
-            mlflow.log_metric("hit_pre", hit_pre2)
+            all_rank += rank
+            all_hit += hit
+            if rank_pre2 and hit_pre2:
+                mlflow.log_metric("rank_pre", rank_pre2)
+                mlflow.log_metric("hit_pre", hit_pre2)
+    ave_rank = all_rank/args.repeat
+    ave_hit = all_hit/args.repeat
+    file_name = "DPLink_{}_{}_1000_1000_epoch_{}.json".format(args.dataset, args.city, args.epoch)
+    results = {
+    "Rank_32": ave_rank,
+    "Hit_32": ave_hit
+    }
+    with open(os.path.join(args.result_path,file_name),'w') as f:
+        json.dump(results, f)

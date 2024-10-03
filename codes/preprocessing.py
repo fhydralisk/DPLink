@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from __future__ import print_function, division
 
 import os
@@ -5,26 +6,52 @@ import time
 import json
 import numpy as np
 from sklearn.neighbors import KDTree
+import pandas as pd
+from datetime import datetime, timezone
+import hashlib
 
 TRAIN_SPLIT = 0.6
 TEST_SPLIT = 0.3
 VALID_SPLIT = 0.1
 
 
+def convert_time_to_hours(time_str):
+    # 解析给定的UTC时间字符串
+    time_format = "%a %b %d %H:%M:%S %z %Y"
+    parsed_time = datetime.strptime(time_str, time_format)
+
+    # 定义2012年4月1日00:00:00的UTC时间
+    start_time = datetime(2012, 4, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+    # 计算从2012年4月1日开始到给定时间的小时数
+    time_difference = parsed_time - start_time
+    hours_difference = time_difference.total_seconds() / 3600
+
+    return hours_difference
+
 # codes for loading data from private telecom trajectories.
-def samples_generator(data_path, data_name, threshold=2000, seed=1):
+def samples_generator(data_path, data_name, threshold=2000, seed=1, use_aug=False):
     tmp = []
     np.random.seed(seed=seed)
-    with open(os.path.join(data_path, data_name)) as fid:
-        for line in fid:
-            user, trace = line.split("\t")
-            trace_len = len(trace.split('|'))
-            # trace_len = 0
+    if use_aug:
+        data = pd.read_csv("{}.csv".format(os.path.join(data_path, data_name)))
+        all_users = list(set(data['user'].values))
+        for user in all_users:
+            user = int(user)
+            traj_points = data[data['user']==user]
+            trace_len = traj_points.shape[0]
             tmp.append([trace_len, user])
+    else:     
+        with open(os.path.join(data_path, data_name)) as fid:
+            for line in fid:
+                user, trace = line.split("\t")
+                trace_len = len(trace.split('|'))
+                # trace_len = 0
+                tmp.append([trace_len, user])
     np.random.shuffle(tmp)
     samples = sorted(tmp, key=lambda x: x[0], reverse=True)
     samples_return = {}
-    for u in [x[1] for x in samples[:threshold]]:
+    for u in [x[1] for x in samples[:threshold]]:  #轨迹点不超过2000的用户
         samples_return[u] = len(samples_return)
     return samples_return
 
@@ -57,7 +84,7 @@ def load_data_match_telecom(data_path, data_name, sample_users=None, poi_type=0)
     data = {}
     with open(os.path.join(data_path, data_name)) as fid:
         for line in fid:
-            user, traces = line.strip("\r\n").split("\t")
+            user, traces = line.strip("\r\n").split("\t") # traj points with other info of an user
             if sample_users is not None:
                 if user not in sample_users:
                     continue
@@ -93,6 +120,81 @@ def load_data_match_telecom(data_path, data_name, sample_users=None, poi_type=0)
         print("telecom users:{}".format(len(data.keys())))
     return data
 
+# # city,user,time,venue_id,utc_time,lon,lat,venue_cat_name
+def load_aug_data(args):
+
+    with open(os.path.join(args.data_path,"{}_loc.json".format(args.aug_name)), "r") as f:
+        loc_result = json.load(f)
+    with open(os.path.join(args.data_path,"{}_all.json".format(args.aug_name)), "r") as f:
+        result = json.load(f)
+
+    poi_set = set()
+
+    for user,sessions in loc_result.items():
+        for session in sessions:
+            for poi in session:
+                poi_set.add(poi)
+    vid_size = len(poi_set) + 1
+
+    mid_result = {}
+    for user,sessions in result.items():
+        if user not in mid_result:
+            mid_result[user] = {}
+        for idx, session in enumerate(sessions):
+            fin_session = []
+            for idx2, traj in enumerate(session):
+                vid = traj[4]
+                day = int(traj[2]%24)
+                poi = [[1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0, 0, 0, 1, 1, 0, 1]]
+                fin_session.append([vid, day, poi])
+            sid = len(mid_result[user])
+            if sid not in mid_result[user]:
+                mid_result[user][sid] = []
+            mid_result[user][sid]=fin_session
+    # fin_result = {}
+    # for user, sessions in mid_result.items():
+    #     if user not in fin_result:
+    #         fin_result[user] = {"sessions":sessions}
+    return mid_result, vid_size
+
+def get_continous(mid_result):
+    user_map = {}
+    poi_map = {}
+    for user, user_sessions in mid_result.items():
+        user = int(user)
+        if user not in user_map:
+            user_map[user] = len(user_map) + 1
+        for day, session in user_sessions.items():
+            for point in session:
+                poi = int(point[0])
+                if poi not in poi_map:
+                    poi_map[poi] = len(poi_map) + 1
+    fin_result = {}
+    for user, user_sessions in mid_result.items():
+        enc_user = user_map[int(user)]
+        if enc_user not in fin_result:
+            fin_result[enc_user] = {}
+        for day, session in user_sessions.items():
+            if day not in fin_result[enc_user]:
+                fin_result[enc_user][day] = []
+            for point in session:
+                poi = int(point[0])
+                enc_poi = poi_map[int(poi)]
+                enc_point = [enc_poi, point[1], point[2]]
+                fin_result[enc_user][day].append(enc_point)
+    fm_fin_result = {}
+    for user, user_sessions in fin_result.items():
+        if user not in fm_fin_result.items():
+            fm_fin_result[user] = {"sessions":user_sessions}
+    return fm_fin_result
+                
+        
+        
+        
+        
+    
+
+# city,user,time,venue_id,utc_time,lon,lat,venue_cat_name
 
 def load_data_match_sparse(data_path, data_name, sample_users, poi_type=0):
     vid_list, vid_lookup, kdtree = load_vids(data_path)
@@ -260,6 +362,83 @@ def extract_user_from_trace(idx, data, range_list):
         else:
             users_traces_id[user_id].append(trace_id)
     return users_traces_id
+
+def data_train_match_aug(data_aug, seed=1, negative_sampling=32,
+                          negative_candidates=False, user_locations=None):
+    np.random.seed(seed)
+    data_input = {"train": [], "valid": [], "test": []}
+    data_len = len(data_aug)
+    idx_aug = list(range(data_len))
+    np.random.shuffle(idx_aug)
+
+    # for training
+    for data_mode in ["train", "valid", "test"]:
+        rl_aug = None
+        if data_mode == "train":
+            rl_aug = range(int(data_len * TRAIN_SPLIT))
+        elif data_mode == "valid":
+            rl_aug = range(int(data_len * TRAIN_SPLIT), int(data_len * (TRAIN_SPLIT + VALID_SPLIT)))
+        elif data_mode == "test":
+            rl_aug = range(int(data_len * (TRAIN_SPLIT + VALID_SPLIT)), data_len)
+
+        rl_aug = list(rl_aug)
+
+        # 提取用户轨迹
+        users_aug = extract_user_from_trace(idx_aug, data_aug, rl_aug)
+        common_users = list(users_aug.keys())
+
+        if negative_candidates:
+            candidate_users2 = candidates_intersect(user_locations, user_locations, users_aug.keys(), users_aug.keys())
+
+        for user_id in common_users:
+            trace_pool_aug = users_aug[user_id]
+            candidate_users = list(set(users_aug.keys()) - set([user_id]))
+
+            for i in range(len(trace_pool_aug)):
+                for j in range(len(trace_pool_aug)):
+                    if data_mode in ["train"]:
+                        # 正样本
+                        data_input[data_mode].append(
+                            (data_aug[trace_pool_aug[i]][:-1],
+                             data_aug[trace_pool_aug[j]][:-1],
+                             1, user_id, user_id))
+                        
+                        # 负样本
+                        if negative_candidates:
+                            fid = candidate_users2[user_id][np.random.randint(0, len(candidate_users2[user_id]))]
+                        else:
+                            fid = candidate_users[np.random.randint(0, len(candidate_users))]
+                        
+                        trace_pool_aug_fake = users_aug[fid]
+                        did = trace_pool_aug_fake[np.random.randint(0, len(trace_pool_aug_fake))]
+                        fi = np.random.randint(0, len(trace_pool_aug))
+                        data_input[data_mode].append(
+                            (data_aug[trace_pool_aug[fi]][:-1],
+                             data_aug[did][:-1], 0, user_id, fid))
+                    
+                    elif data_mode in ["test", "valid"]:
+                        test_set = []
+                        test_set.append(
+                            (data_aug[trace_pool_aug[i]][:-1],
+                             data_aug[trace_pool_aug[j]][:-1],
+                             1, user_id, user_id))
+                        
+                        for _ in range(negative_sampling - 1):
+                            if negative_candidates:
+                                fid = candidate_users2[user_id][np.random.randint(0, len(candidate_users2[user_id]))]
+                            else:
+                                fid = candidate_users[np.random.randint(0, len(candidate_users))]
+                            
+                            trace_pool_aug_fake = users_aug[fid]
+                            did = trace_pool_aug_fake[np.random.randint(0, len(trace_pool_aug_fake))]
+                            test_set.append(
+                                (data_aug[trace_pool_aug[i]][:-1],
+                                 data_aug[did][:-1], 0, user_id, fid))
+                        data_input[data_mode].append(test_set)
+
+    print("train:{} valid:{} test:{}".format(len(data_input["train"]),
+                                             len(data_input["valid"]), len(data_input["test"])))
+    return data_input
 
 
 def data_train_match_fix2(data_sparse, data_dense, seed=1, negative_sampling=32,

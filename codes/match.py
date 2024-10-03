@@ -31,22 +31,22 @@ def run_siamese(SN, args, data_input, LR, train_mode='cross',
     # training and inferring
     loss_records = {"training": [], "validation": [], "testing": []}
     metrics_records = {"training": {"acc": [], "rec": [], "f1": [], "auc": []},
-                       "validation": {"rank": [], "hit": [], "list": []},
-                       "testing": {"rank": [], "hit": [], "list": []}}
+                       "validation": {"acc": [], "rec": [], "f1": [], "auc": []},
+                       "testing": {"acc": [], "rec": [], "f1": [], "auc": []}}
     if SAVE_PATH is None:
         SAVE_PATH = args.save_path
     tmp_path = 'checkpoint'
     os.makedirs(os.path.join(SAVE_PATH, tmp_path))
     for e in tqdm(range(args.epoch), desc="EPOCH"):
-        training_len = len(data_input["train"])
-        testing_len = len(data_input["test"])
-        validing_len = len(data_input["valid"])
+        training_len = int(len(data_input["train"])/1000)
+        testing_len = int(len(data_input["test"])/1000)
+        validing_len = int(len(data_input["valid"])/1000)
 
         if reproduction is False:
             # training
             ###############
-            if train_mode == 'self':
-                training_len = min(3000 * 32, training_len)  # only select partial data for faster training
+            if train_mode == 'self':  #modify 32->4
+                training_len = min(3000 *32, training_len)  # only select partial data for faster training
                 if e == 0:
                     print("\ntraining instances:{}".format(training_len))
             ###############
@@ -90,12 +90,11 @@ def run_siamese(SN, args, data_input, LR, train_mode='cross',
             torch.save(SN.state_dict(), os.path.join(SAVE_PATH, tmp_path, str(e) + '.m'))
 
             # validation
-            total_loss = []
-            rank_list = []
+            all_acc, all_rec, all_f1, all_auc = [],[],[],[]
             SN.train(False)
             metrics = {'TP': 0, 'TN': 0, 'FP': 0, 'FN': 0}
             for i in range(0, validing_len):
-                pre_list, tg_list = [], []
+                acc_list, rec_list, f1_list, auc_list = [], [], [], []
                 for j in range(int(args.neg / BATCH_SIZE)):
                     samples = copy.deepcopy(data_input["valid"][i][j * BATCH_SIZE:(j + 1) * BATCH_SIZE])
                     batch_data = gen_batch_similarity(samples, device=device, poi=USE_POI)
@@ -111,25 +110,36 @@ def run_siamese(SN, args, data_input, LR, train_mode='cross',
                     scores = trans_scores(args.loss_mode, scores, cos_dis)
                     metrics, pre = cal_metrics_batch(metrics=metrics, scores=scores, tg=tg, loss_mode=args.loss_mode)
                     total_loss.append(collect_loss(loss))
-                    pre_list.extend(pre)
-                    tg_list.extend(tg)
-                rank_batch = [x[1] for x in sorted(zip(pre_list, tg_list), key=lambda xx: xx[0], reverse=True)].index(1)
-                rank_list.append(rank_batch)
-            hit_list = hit_rate(rank_list, args.topk)
-            metrics_records["validation"]["rank"].append(np.mean(rank_list))
-            metrics_records["validation"]["hit"].append(np.mean(hit_list))
-            metrics_records["validation"]["list"].append(rank_list)
-            print("Validation loss:{:.4f} avg-rank:{:.4f}/{:d} avg-hit:{:.4f}/{:d}".format(
-                np.mean(total_loss), np.mean(rank_list), args.neg, np.mean(hit_list), args.topk))
+                    # pre_list.extend(pre)
+                    # tg_list.extend(tg)
+                    accuracy, recall, F1 = cal_f1(metrics)
+                    acc_list.append(accuracy)
+                    rec_list.append(recall)
+                    f1_list.append(F1)
+                    auc_list.append(
+                        roc_auc_score(y_true=tg, y_score=scores.detach().cpu().numpy()))
+                best = acc_list.index(max(acc_list))
+                all_acc.append(acc_list[best])
+                all_auc.append(auc_list[best])
+                all_rec.append(rec_list[best])
+                all_f1.append(f1_list[best])
+            metrics_records["validation"]["acc"].append(np.mean(all_acc))
+            metrics_records["validation"]["auc"].append(np.mean(all_auc))
+            metrics_records["validation"]["f1"].append(np.mean(all_f1))
+            metrics_records["validation"]["rec"].append(np.mean(all_rec))
+
             avg_loss = np.mean(total_loss)
             loss_records["validation"].append(avg_loss)
+            
+            print("Validation loss:{} acc:{} rec:{} f1:{}".format(
+        loss_records["validation"], metrics_records["validation"]["acc"], metrics_records["validation"]["rec"], metrics_records["validation"]["f1"]))
 
             scheduler.step(avg_loss)
             lr_last = LR
             LR = optimizer.param_groups[0]['lr']
             if lr_last > LR:
-                load_epoch = np.argmax(metrics_records["validation"]["hit"])
-                SN.load_state_dict(torch.load(os.path.join(SAVE_PATH, tmp_path, str(load_epoch) + '.m')))
+                load_epoch = np.argmax(metrics_records["validation"]["acc"])
+                SN.load_state_dict(torch.load(os.path.join(SAVE_PATH, tmp_path, str(load_epoch) + '.m'), map_location=device, strict=False))
                 print('load epoch={} model state'.format(load_epoch))
                 # continue
             if LR <= LR_LOWER_BOUND:
@@ -137,8 +147,8 @@ def run_siamese(SN, args, data_input, LR, train_mode='cross',
             if reproduction:
                 break
 
-    mid = np.argmax(metrics_records["validation"]["hit"])
-    SN.load_state_dict(torch.load(os.path.join(SAVE_PATH, tmp_path, str(mid) + '.m')))
+    mid = np.argmax(metrics_records["validation"]["acc"])
+    SN.load_state_dict(torch.load(os.path.join(SAVE_PATH, tmp_path, str(mid) + '.m'),weights_only=True))
 
     # testing
     SN.train(False)
@@ -164,28 +174,46 @@ def run_siamese(SN, args, data_input, LR, train_mode='cross',
                 loss = cal_loss(args.loss_mode, scores, target, target2, criterion, criterion2)
                 scores = trans_scores(args.loss_mode, scores, cos_dis)
                 metrics, pre = cal_metrics_batch(metrics=metrics, scores=scores, tg=tg, loss_mode=args.loss_mode)
+                accuracy, recall, F1 = cal_f1(metrics)
+                metrics_records["testing"]["acc"].append(accuracy)
+                metrics_records["testing"]["rec"].append(recall)
+                metrics_records["testing"]["f1"].append(F1)
+                metrics_records["testing"]["auc"].append(
+                    roc_auc_score(y_true=tg, y_score=scores))
+                print("Testing loss:{:.4f} acc:{:.4f} rec:{:.4f} f1:{:.4f}".format(
+                    np.mean(loss), accuracy, recall, F1))
                 total_loss.append(collect_loss(loss))
                 pre_list.extend(pre)
                 tg_list.extend(tg)
             rank_batch = [x[1] for x in sorted(zip(pre_list, tg_list), key=lambda xx: xx[0], reverse=True)].index(1)
             rank_list.append(rank_batch)
-        loss_records["testing"].append(np.mean(total_loss))
-        hit_list = hit_rate(rank_list, args.topk)
-        metrics_records["testing"]["rank"].append(np.mean(rank_list))
-        metrics_records["testing"]["hit"].append(np.mean(hit_list))
-        metrics_records["testing"]["list"].append(rank_list)
-        print("Testing loss:{:.4f} avg-rank:{:.4f}/{:d} avg-hit:{:.4f}/{:d}".format(
-            np.mean(total_loss), np.mean(rank_list), args.neg, np.mean(hit_list), args.topk))
+
+        # loss_records["testing"].append(np.mean(total_loss))
+        # hit_list = hit_rate(rank_list, args.topk)
+        # metrics_records["testing"]["rank"].append(np.mean(rank_list))
+        # metrics_records["testing"]["hit"].append(np.mean(hit_list))
+        # metrics_records["testing"]["list"].append(rank_list)
+        # metrics = {'TP': 0, 'TN': 0, 'FP': 0, 'FN': 0}
+        # accuracy, recall, F1 = cal_f1(metrics)
+        # metrics_records["testing"]["acc"].append(accuracy)
+        # metrics_records["testing"]["rec"].append(recall)
+        # metrics_records["testing"]["f1"].append(F1)
+        # metrics_records["testing"]["auc"].append(
+        #     roc_auc_score(y_true=label_predict["label"], y_score=label_predict["predict"]))
+        # print("Testing loss:{:.4f} acc:{:.4f} rec:{:.4f} f1:{:.4f}".format(
+        #     np.mean(total_loss), accuracy, recall, F1))
+        # print("Testing loss:{:.4f} avg-rank:{:.4f}/{:d} avg-hit:{:.4f}/{:d}".format(
+        #     np.mean(total_loss), np.mean(rank_list), args.neg, np.mean(hit_list), args.topk))
 
     mid = 0
     if reproduction is False:
 
         if test_pretrain:
             for i in range(len(metrics_records["validation"]["hit"])):
-                SN.load_state_dict(torch.load(os.path.join(SAVE_PATH, tmp_path, str(i) + '.m')))
+                SN.load_state_dict(torch.load(os.path.join(SAVE_PATH, tmp_path, str(i) + '.m'), weights_only=True))
                 torch.save(SN.state_dict(), os.path.join(SAVE_PATH, 'SN-pre-' + str(i) + '.m'))
-        mid = np.argmax(metrics_records["validation"]["hit"])
-        SN.load_state_dict(torch.load(os.path.join(SAVE_PATH, tmp_path, str(mid) + '.m')))
+        mid = np.argmax(metrics_records["validation"]["acc"])
+        SN.load_state_dict(torch.load(os.path.join(SAVE_PATH, tmp_path, str(mid) + '.m'), weights_only=True))
 
         save_name = '-'.join([args.data_name, args.loss_mode, args.rnn_mod, args.attn_mod, str(args.layers)])
         if train_mode == 'self':
@@ -221,62 +249,80 @@ def run_siamese(SN, args, data_input, LR, train_mode='cross',
 
 def run_experiments(args, run_id=0, device=None, USE_POI=False, model_type='S', unit=None):
     IS_NEG = (args.intersect == 1)
-
-    if args.data_name in ["weibo"]:
-        dense_name = 'isp'
-        vid_list, _, _ = load_vids(args.data_path)
-        vid_size = len(vid_list) + 1
-        sample_users = samples_generator(args.data_path, args.data_name, threshold=args.threshold)
-        data_dense = load_data_match_telecom(args.data_path, 'isp', sample_users=sample_users,
-                                             poi_type=args.poi_type)
-        data_sparse = load_data_match_sparse(args.data_path, args.data_name, sample_users=sample_users,
-                                             poi_type=args.poi_type)
-    elif args.data_name == 'foursquare':
-        dense_name = 'twitter'
-        data_dense, data_sparse, global_location, global_location_lookup = load_data_match_tf(args.data_path)
-        vid_size = len(global_location) + 1
-        USE_POI = False
-
-    data_dense_split, user_locations_dense = data_split2(data_dense, match_label=True,
+    if args.use_aug:
+        # sample_users = samples_generator(args.data_path, args.data_name, threshold=args.threshold, use_aug = args.use_aug)
+        data_aug, vid_size = load_aug_data(args)
+        data_aug = get_continous(data_aug)
+        data_aug_split, user_locations_aug = data_split2(data_aug, match_label=True,
                                                          vid_size=vid_size, noise_th=args.noise, poi=USE_POI)
-    data_sparse_split, user_locations_sparse = data_split2(data_sparse, match_label=True,
-                                                           vid_size=vid_size, noise_th=args.noise, poi=USE_POI)
+        data_input_aug = data_train_match_aug(data_aug=data_aug_split, negative_sampling=args.neg,
+                    negative_candidates=IS_NEG, user_locations=user_locations_aug)
+                # build model
+        SN_aug = SiameseNet(loc_size=vid_size, tim_size=24, loc_emb_size=args.loc_emb_size,
+                            tim_emb_size=args.tim_emb_size, hidden_size=args.hidden_size,
+                            batch_size=args.batch_size, device=device, loss_mode=args.loss_mode,
+                            mod=args.rnn_mod, attn_mod=args.attn_mod, layers=args.layers, fusion=model_type,
+                            poi_size=args.poi_size if USE_POI else None,
+                            poi_emb_size=args.poi_emb_size if USE_POI else None)
+        SN_aug = SN_aug.to(device)
+    else:
+        if args.dataset in ["weibo"]:
+            dense_name = 'isp'
+            vid_list, _, _ = load_vids(args.data_path)
+            vid_size = len(vid_list) + 1
+            sample_users = samples_generator(args.data_path, args.dataset, threshold=args.threshold, use_aug = args.use_aug)
+            data_dense = load_data_match_telecom(args.data_path, 'isp', sample_users=sample_users,
+                                                poi_type=args.poi_type)
+            data_sparse = load_data_match_sparse(args.data_path, args.dataset, sample_users=sample_users,
+                                                poi_type=args.poi_type)
+        elif args.dataset == 'foursquare':
+            dense_name = 'twitter'
+            data_dense, data_sparse, global_location, global_location_lookup = load_data_match_tf(args.data_path)
+            vid_size = len(global_location) + 1
+            USE_POI = False
 
-    print("load {} data!".format(dense_name))
-    data_input_dense_siamese = data_train_match_fix2(data_dense_split, data_dense_split,
-                                                     negative_sampling=args.neg, negative_candidates=False,
-                                                     user_locations_dense=user_locations_dense,
-                                                     user_locations_sparse=user_locations_sparse)
-    print("load {} data!".format(args.data_name))
-    data_input = data_train_match_fix2(data_sparse_split, data_dense_split,
-                                       negative_sampling=args.neg, negative_candidates=IS_NEG,
-                                       user_locations_dense=user_locations_dense,
-                                       user_locations_sparse=user_locations_sparse)
+        data_dense_split, user_locations_dense = data_split2(data_dense, match_label=True,
+                                                            vid_size=vid_size, noise_th=args.noise, poi=USE_POI)
+        data_sparse_split, user_locations_sparse = data_split2(data_sparse, match_label=True,
+                                                            vid_size=vid_size, noise_th=args.noise, poi=USE_POI)
 
-    # build model
-    SN_sparse = SiameseNet(loc_size=vid_size, tim_size=24, loc_emb_size=args.loc_emb_size,
-                           tim_emb_size=args.tim_emb_size, hidden_size=args.hidden_size,
-                           batch_size=args.batch_size, device=device, loss_mode=args.loss_mode,
-                           mod=args.rnn_mod, attn_mod=args.attn_mod, layers=args.layers, fusion=model_type,
-                           poi_size=args.poi_size if USE_POI else None,
-                           poi_emb_size=args.poi_emb_size if USE_POI else None)
-    SN_dense = SiameseNet(loc_size=vid_size, tim_size=24, loc_emb_size=args.loc_emb_size,
-                          tim_emb_size=args.tim_emb_size, hidden_size=args.hidden_size,
-                          batch_size=args.batch_size, device=device, loss_mode=args.loss_mode,
-                          mod=args.rnn_mod, attn_mod=args.attn_mod, layers=args.layers, fusion=model_type,
-                          poi_size=args.poi_size if USE_POI else None,
-                          poi_emb_size=args.poi_emb_size if USE_POI else None)
-    SN_sparse = SN_sparse.to(device)
-    SN_dense = SN_dense.to(device)
+        print("load {} data!".format(dense_name))
+    # def data_train_match_fix2(data_sparse, data_dense, seed=1, negative_sampling=32,
+                        #   negative_candidates=False, user_locations_sparse=None, user_locations_dense=None)
+        data_input_dense_siamese = data_train_match_fix2(data_dense_split, data_dense_split,
+                                                        negative_sampling=args.neg, negative_candidates=False,
+                                                        user_locations_dense=user_locations_dense,
+                                                        user_locations_sparse=user_locations_sparse)
+        print("load {} data!".format(args.dataset))
+        data_input = data_train_match_fix2(data_sparse_split, data_dense_split,
+                                        negative_sampling=args.neg, negative_candidates=IS_NEG,
+                                        user_locations_dense=user_locations_dense,
+                                        user_locations_sparse=user_locations_sparse)
+
+        # build model
+        SN_sparse = SiameseNet(loc_size=vid_size, tim_size=24, loc_emb_size=args.loc_emb_size,
+                            tim_emb_size=args.tim_emb_size, hidden_size=args.hidden_size,
+                            batch_size=args.batch_size, device=device, loss_mode=args.loss_mode,
+                            mod=args.rnn_mod, attn_mod=args.attn_mod, layers=args.layers, fusion=model_type,
+                            poi_size=args.poi_size if USE_POI else None,
+                            poi_emb_size=args.poi_emb_size if USE_POI else None)
+        SN_dense = SiameseNet(loc_size=vid_size, tim_size=24, loc_emb_size=args.loc_emb_size,
+                            tim_emb_size=args.tim_emb_size, hidden_size=args.hidden_size,
+                            batch_size=args.batch_size, device=device, loss_mode=args.loss_mode,
+                            mod=args.rnn_mod, attn_mod=args.attn_mod, layers=args.layers, fusion=model_type,
+                            poi_size=args.poi_size if USE_POI else None,
+                            poi_emb_size=args.poi_emb_size if USE_POI else None)
+        SN_sparse = SN_sparse.to(device)
+        SN_dense = SN_dense.to(device)
 
     # pretrain step
     rank_pre, hit_pre = None, None
-    if args.pretrain:
+    if args.pretrain and not args.use_aug:
         if run_id == 0:
             SN_dense, rank_pre, hit_pre = run_siamese(SN_dense, args, data_input_dense_siamese, args.lr_pretrain,
                                                       train_mode='self', device=device, USE_POI=USE_POI)
         else:
-            SN_dense.load_state_dict(torch.load(os.path.join(args.save_path, "SN-pre.m")))
+            SN_dense.load_state_dict(torch.load(os.path.join(args.save_path, "SN-pre.m"), map_location=device))
 
         if unit == "N":
             pass
@@ -316,8 +362,15 @@ def run_experiments(args, run_id=0, device=None, USE_POI=False, model_type='S', 
             # default: ERCF
             SN_sparse.load_state_dict(SN_dense.state_dict())
     # normal experiments
-    SN_sparse, rank_32, hit_32 = run_siamese(SN_sparse, args, data_input, args.lr_match,
-                                             train_mode='cross', device=device, USE_POI=USE_POI)
-    rank_neg, hit_neg = rank_32, hit_32
+    if not args.use_aug:
+        SN_sparse, rank_32, hit_32 = run_siamese(SN_sparse, args, data_input, args.lr_match,
+                                                train_mode='cross', device=device, USE_POI=USE_POI)
+        rank_neg, hit_neg = rank_32, hit_32
 
-    return SN_sparse, rank_neg, hit_neg, rank_pre, hit_pre
+        return SN_sparse, rank_neg, hit_neg, rank_pre, hit_pre
+    else:
+        SN_aug, rank_32, hit_32 = run_siamese(SN_aug, args, data_input_aug, args.lr_match,
+                                                train_mode='self', device=device, USE_POI=USE_POI)
+        rank_neg, hit_neg = rank_32, hit_32
+
+        return SN_aug, rank_neg, hit_neg, rank_pre, hit_pre
