@@ -31,16 +31,16 @@ def run_siamese(SN, args, data_input, LR, train_mode='cross',
     # training and inferring
     loss_records = {"training": [], "validation": [], "testing": []}
     metrics_records = {"training": {"acc": [], "rec": [], "f1": [], "auc": []},
-                       "validation": {"acc": [], "rec": [], "f1": [], "auc": []},
-                       "testing": {"acc": [], "rec": [], "f1": [], "auc": []}}
+                       "validation": {"rank": [], "hit": [], "list": [], "acc": []},
+                       "testing": {"rank": [], "hit": [], "list": []}}
     if SAVE_PATH is None:
         SAVE_PATH = args.save_path
     tmp_path = 'checkpoint'
     os.makedirs(os.path.join(SAVE_PATH, tmp_path))
     for e in tqdm(range(args.epoch), desc="EPOCH"):
-        training_len = int(len(data_input["train"])/1000)
-        testing_len = int(len(data_input["test"])/1000)
-        validing_len = int(len(data_input["valid"])/1000)
+        training_len = int(len(data_input["train"]))
+        testing_len = int(len(data_input["test"]))
+        validing_len = int(len(data_input["valid"]))
 
         if reproduction is False:
             # training
@@ -90,13 +90,14 @@ def run_siamese(SN, args, data_input, LR, train_mode='cross',
             torch.save(SN.state_dict(), os.path.join(SAVE_PATH, tmp_path, str(e) + '.m'))
 
             # validation
-            all_acc, all_rec, all_f1, all_auc = [],[],[],[]
+            total_loss=[]
+            rank_list=[]
             SN.train(False)
             metrics = {'TP': 0, 'TN': 0, 'FP': 0, 'FN': 0}
             for i in range(0, validing_len):
-                acc_list, rec_list, f1_list, auc_list = [], [], [], []
+                pre_list, tg_list = [], []
                 for j in range(int(args.neg / BATCH_SIZE)):
-                    samples = copy.deepcopy(data_input["valid"][i][j * BATCH_SIZE:(j + 1) * BATCH_SIZE])
+                    samples = copy.deepcopy(data_input["valid"][i][j * BATCH_SIZE:(j     + 1) * BATCH_SIZE])
                     batch_data = gen_batch_similarity(samples, device=device, poi=USE_POI)
                     if USE_POI:
                         loc_top, tim_top, poi_top, top_lens, loc_down, tim_down, poi_down, down_lens, tg = batch_data
@@ -110,35 +111,27 @@ def run_siamese(SN, args, data_input, LR, train_mode='cross',
                     scores = trans_scores(args.loss_mode, scores, cos_dis)
                     metrics, pre = cal_metrics_batch(metrics=metrics, scores=scores, tg=tg, loss_mode=args.loss_mode)
                     total_loss.append(collect_loss(loss))
-                    # pre_list.extend(pre)
-                    # tg_list.extend(tg)
-                    accuracy, recall, F1 = cal_f1(metrics)
-                    acc_list.append(accuracy)
-                    rec_list.append(recall)
-                    f1_list.append(F1)
-                    auc_list.append(
-                        roc_auc_score(y_true=tg, y_score=scores.detach().cpu().numpy()))
-                best = acc_list.index(max(acc_list))
-                all_acc.append(acc_list[best])
-                all_auc.append(auc_list[best])
-                all_rec.append(rec_list[best])
-                all_f1.append(f1_list[best])
-            metrics_records["validation"]["acc"].append(np.mean(all_acc))
-            metrics_records["validation"]["auc"].append(np.mean(all_auc))
-            metrics_records["validation"]["f1"].append(np.mean(all_f1))
-            metrics_records["validation"]["rec"].append(np.mean(all_rec))
+                    pre_list.extend(pre)
+                    tg_list.extend(tg)
+                rank_batch = [x[1] for x in sorted(zip(pre_list, tg_list), key = lambda xx: xx[0],reverse=True)].index(1)
+                rank_list.append(rank_batch)
+            hit_list, acc_list = hit_rate(rank_list,args.topk)
+            metrics_records["validation"]["rank"].append(np.mean(rank_list))
+            metrics_records["validation"]["hit"].append(np.mean(hit_list))
+            metrics_records["validation"]["acc"].append(np.mean(acc_list))
+            metrics_records["validation"]["list"].append(rank_list)
 
             avg_loss = np.mean(total_loss)
             loss_records["validation"].append(avg_loss)
             
-            print("Validation loss:{} acc:{} rec:{} f1:{}".format(
-        loss_records["validation"], metrics_records["validation"]["acc"], metrics_records["validation"]["rec"], metrics_records["validation"]["f1"]))
-
+            print("Validation loss:{:.4f} avg-rank:{:.4f}/{:d} avg-hit:{:.4f}/{:d} avg-acc:{:.4f}/{:d}".format(
+                np.mean(total_loss), np.mean(rank_list), args.neg, np.mean(hit_list), args.topk, np.mean(acc_list), args.topk))
+            
             scheduler.step(avg_loss)
             lr_last = LR
             LR = optimizer.param_groups[0]['lr']
             if lr_last > LR:
-                load_epoch = np.argmax(metrics_records["validation"]["acc"])
+                load_epoch = np.argmax(metrics_records["validation"]["hit"])
                 SN.load_state_dict(torch.load(os.path.join(SAVE_PATH, tmp_path, str(load_epoch) + '.m'), map_location=device, strict=False))
                 print('load epoch={} model state'.format(load_epoch))
                 # continue
@@ -147,7 +140,7 @@ def run_siamese(SN, args, data_input, LR, train_mode='cross',
             if reproduction:
                 break
 
-    mid = np.argmax(metrics_records["validation"]["acc"])
+    mid = np.argmax(metrics_records["validation"]["hit"])
     SN.load_state_dict(torch.load(os.path.join(SAVE_PATH, tmp_path, str(mid) + '.m'),weights_only=True))
 
     # testing
@@ -174,25 +167,17 @@ def run_siamese(SN, args, data_input, LR, train_mode='cross',
                 loss = cal_loss(args.loss_mode, scores, target, target2, criterion, criterion2)
                 scores = trans_scores(args.loss_mode, scores, cos_dis)
                 metrics, pre = cal_metrics_batch(metrics=metrics, scores=scores, tg=tg, loss_mode=args.loss_mode)
-                accuracy, recall, F1 = cal_f1(metrics)
-                metrics_records["testing"]["acc"].append(accuracy)
-                metrics_records["testing"]["rec"].append(recall)
-                metrics_records["testing"]["f1"].append(F1)
-                metrics_records["testing"]["auc"].append(
-                    roc_auc_score(y_true=tg, y_score=scores))
-                print("Testing loss:{:.4f} acc:{:.4f} rec:{:.4f} f1:{:.4f}".format(
-                    np.mean(loss), accuracy, recall, F1))
                 total_loss.append(collect_loss(loss))
                 pre_list.extend(pre)
                 tg_list.extend(tg)
             rank_batch = [x[1] for x in sorted(zip(pre_list, tg_list), key=lambda xx: xx[0], reverse=True)].index(1)
             rank_list.append(rank_batch)
 
-        # loss_records["testing"].append(np.mean(total_loss))
-        # hit_list = hit_rate(rank_list, args.topk)
-        # metrics_records["testing"]["rank"].append(np.mean(rank_list))
-        # metrics_records["testing"]["hit"].append(np.mean(hit_list))
-        # metrics_records["testing"]["list"].append(rank_list)
+        loss_records["testing"].append(np.mean(total_loss))
+        hit_list, _ = hit_rate(rank_list, args.topk)
+        metrics_records["testing"]["rank"].append(np.mean(rank_list))
+        metrics_records["testing"]["hit"].append(np.mean(hit_list))
+        metrics_records["testing"]["list"].append(rank_list)
         # metrics = {'TP': 0, 'TN': 0, 'FP': 0, 'FN': 0}
         # accuracy, recall, F1 = cal_f1(metrics)
         # metrics_records["testing"]["acc"].append(accuracy)
@@ -202,8 +187,8 @@ def run_siamese(SN, args, data_input, LR, train_mode='cross',
         #     roc_auc_score(y_true=label_predict["label"], y_score=label_predict["predict"]))
         # print("Testing loss:{:.4f} acc:{:.4f} rec:{:.4f} f1:{:.4f}".format(
         #     np.mean(total_loss), accuracy, recall, F1))
-        # print("Testing loss:{:.4f} avg-rank:{:.4f}/{:d} avg-hit:{:.4f}/{:d}".format(
-        #     np.mean(total_loss), np.mean(rank_list), args.neg, np.mean(hit_list), args.topk))
+        print("Testing loss:{:.4f} avg-rank:{:.4f}/{:d} avg-hit:{:.4f}/{:d}".format(
+            np.mean(total_loss), np.mean(rank_list), args.neg, np.mean(hit_list), args.topk))
 
     mid = 0
     if reproduction is False:
@@ -212,7 +197,7 @@ def run_siamese(SN, args, data_input, LR, train_mode='cross',
             for i in range(len(metrics_records["validation"]["hit"])):
                 SN.load_state_dict(torch.load(os.path.join(SAVE_PATH, tmp_path, str(i) + '.m'), weights_only=True))
                 torch.save(SN.state_dict(), os.path.join(SAVE_PATH, 'SN-pre-' + str(i) + '.m'))
-        mid = np.argmax(metrics_records["validation"]["acc"])
+        mid = np.argmax(metrics_records["validation"]["hit"])
         SN.load_state_dict(torch.load(os.path.join(SAVE_PATH, tmp_path, str(mid) + '.m'), weights_only=True))
 
         save_name = '-'.join([args.data_name, args.loss_mode, args.rnn_mod, args.attn_mod, str(args.layers)])
@@ -241,10 +226,10 @@ def run_siamese(SN, args, data_input, LR, train_mode='cross',
 
     rank_re, hit_re = None, None
     if train_mode == 'cross':
-        rank_re, hit_re = metrics_records["testing"]["rank"][0], metrics_records["testing"]["hit"][0]
+        rank_re, hit_re, acc_re = metrics_records["validation"]["rank"][0], metrics_records["validation"]["hit"][0], metrics_records["validation"]["acc"][0]
     elif train_mode == 'self':
-        rank_re, hit_re = metrics_records["validation"]["rank"][mid], metrics_records["validation"]["hit"][mid]
-    return SN, rank_re, hit_re
+        rank_re, hit_re, acc_re = metrics_records["validation"]["rank"][mid], metrics_records["validation"]["hit"][mid], metrics_records["validation"]["acc"][mid]
+    return SN, rank_re, hit_re, acc_re
 
 
 def run_experiments(args, run_id=0, device=None, USE_POI=False, model_type='S', unit=None):
@@ -319,7 +304,7 @@ def run_experiments(args, run_id=0, device=None, USE_POI=False, model_type='S', 
     rank_pre, hit_pre = None, None
     if args.pretrain and not args.use_aug:
         if run_id == 0:
-            SN_dense, rank_pre, hit_pre = run_siamese(SN_dense, args, data_input_dense_siamese, args.lr_pretrain,
+            SN_dense, rank_pre, hit_pre, acc_pre = run_siamese(SN_dense, args, data_input_dense_siamese, args.lr_pretrain,
                                                       train_mode='self', device=device, USE_POI=USE_POI)
         else:
             SN_dense.load_state_dict(torch.load(os.path.join(args.save_path, "SN-pre.m"), map_location=device))
@@ -362,6 +347,7 @@ def run_experiments(args, run_id=0, device=None, USE_POI=False, model_type='S', 
             # default: ERCF
             SN_sparse.load_state_dict(SN_dense.state_dict())
     # normal experiments
+    # model, rank, hit, rank_pre, hit_pre
     if not args.use_aug:
         SN_sparse, rank_32, hit_32 = run_siamese(SN_sparse, args, data_input, args.lr_match,
                                                 train_mode='cross', device=device, USE_POI=USE_POI)
@@ -369,8 +355,8 @@ def run_experiments(args, run_id=0, device=None, USE_POI=False, model_type='S', 
 
         return SN_sparse, rank_neg, hit_neg, rank_pre, hit_pre
     else:
-        SN_aug, rank_32, hit_32 = run_siamese(SN_aug, args, data_input_aug, args.lr_match,
+        SN_aug, rank_32, hit_32, acc_32 = run_siamese(SN_aug, args, data_input_aug, args.lr_match,
                                                 train_mode='self', device=device, USE_POI=USE_POI)
         rank_neg, hit_neg = rank_32, hit_32
 
-        return SN_aug, rank_neg, hit_neg, rank_pre, hit_pre
+        return SN_aug, rank_neg, hit_neg, acc_32,rank_pre, hit_pre

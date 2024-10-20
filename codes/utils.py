@@ -41,14 +41,18 @@ def collect_metrics(metrics_records, loss_records, step_name, metrics, label_pre
 
 def hit_rate(rank_list, topk):
     hit_list = []
+    acc_list = []
     for rank in rank_list:
         rank = rank + 1
         if rank > topk:
             hit = 0
+            acc = 0
         else:
             hit = 1.0 / topk * (topk + 1 - rank)
+            acc = 1
         hit_list.append(hit)
-    return hit_list
+        acc_list.append(acc)
+    return hit_list, acc_list
 
 
 def cal_metrics_batch(metrics, scores, tg, loss_mode):
