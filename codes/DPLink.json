@@ -1,0 +1,1 @@
+{"hidden_size": 200, "loc_emb_size": 200, "tim_emb_size": 10, "dropout_p": 0.3, "lr_match": 0.0005, "loss_mode": "BCELoss", "l2": 1e-06}
